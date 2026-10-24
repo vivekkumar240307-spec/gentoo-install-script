@@ -90,7 +90,7 @@ USERNAME=$(ask "Username" "user")
 ROOT_PW=$(ask_secret "Root password")
 USER_PW=$(ask_secret "Password for $USERNAME")
 
-GPU=$(choose "Graphics driver (VIDEO_CARDS):" "intel" "amdgpu radeonsi" "nouveau" "vmware" "virtualbox" "fbdev vesa")
+GPU="amdgpu radeonsi"   # AMD only; microcode comes with sys-kernel/linux-firmware
 KERNEL=$(choose "Kernel:" "gentoo-kernel-bin (prebuilt, fast)" "gentoo-kernel (compile locally)")
 KERNEL=${KERNEL%% *}
 BINHOST=yes   # official Gentoo binhost is the primary package source
@@ -194,7 +194,7 @@ MAKEOPTS="-j${JOBS}"
 # Binary packages first: --getbinpkg fetches from the binhost, falling back to
 # a source build only when no binary matches the USE flags.
 EMERGE_DEFAULT_OPTS="--jobs=2 --quiet-build=y --getbinpkg --binpkg-respect-use=y"
-FEATURES="getbinpkg binpkg-request-signature"
+FEATURES="getbinpkg binpkg-request-signature parallel-fetch"
 ACCEPT_LICENSE="-* @FREE @BINARY-REDISTRIBUTABLE"
 LC_MESSAGES=C.utf8
 
@@ -208,6 +208,36 @@ EOF
 mkdir -p "$MNT/etc/portage/repos.conf" "$MNT/etc/portage/package.use"
 cp "$MNT/usr/share/portage/config/repos.conf" "$MNT/etc/portage/repos.conf/gentoo.conf"
 cp -L /etc/resolv.conf "$MNT/etc/resolv.conf"
+
+# ---------- fastest binhost mirror ----------
+# Time a real download of the binhost package index from each candidate and
+# use the quickest one as the binary package source (falls back to the CDN).
+c_info "Testing binhost mirrors for speed..."
+BH_PATH="releases/amd64/binpackages/23.0/x86-64"
+BH_CANDIDATES=(
+    "https://distfiles.gentoo.org/${BH_PATH}"
+    "https://ftp.riken.jp/Linux/gentoo/${BH_PATH}"
+    "https://mirrors.mit.edu/gentoo-distfiles/${BH_PATH}"
+)
+BEST_BH="${BH_CANDIDATES[0]}"; BEST_MS=999999999
+for u in "${BH_CANDIDATES[@]}"; do
+    s=$(date +%s%N)
+    if timeout 60 wget -q -T 20 -t 1 -O /dev/null "$u/Packages"; then
+        ms=$(( ($(date +%s%N) - s) / 1000000 ))
+        printf '    %6d ms  %s\n' "$ms" "$u"
+        if (( ms < BEST_MS )); then BEST_MS=$ms; BEST_BH=$u; fi
+    else
+        printf '    failed     %s\n' "$u"
+    fi
+done
+c_info "Using binhost: $BEST_BH"
+mkdir -p "$MNT/etc/portage/binrepos.conf"
+rm -f "$MNT"/etc/portage/binrepos.conf/*.conf
+cat > "$MNT/etc/portage/binrepos.conf/gentoobinhost.conf" <<EOF
+[gentoobinhost]
+priority = 9999
+sync-uri = ${BEST_BH}/
+EOF
 
 cat > "$MNT/etc/portage/package.use/installer" <<EOF
 sys-kernel/installkernel grub dracut
@@ -273,6 +303,12 @@ BH
 fi
 ${GETUTO}
 
+echo "[*] Selecting fastest source (distfiles) mirrors..."
+emerge --verbose --oneshot app-portage/mirrorselect || true
+mirrorselect -s3 -b10 -D -o >> /etc/portage/make.conf || true
+# keep the official CDN as a last-resort fallback (Gentoo wiki: GENTOO_MIRRORS)
+echo 'GENTOO_MIRRORS="\${GENTOO_MIRRORS} https://distfiles.gentoo.org"' >> /etc/portage/make.conf
+
 echo "[*] Selecting profile ${PROFILE_NAME}..."
 eselect profile set "${PROFILE_NAME}"
 
@@ -298,7 +334,7 @@ emerge --verbose sys-kernel/linux-firmware sys-kernel/installkernel
 emerge --verbose sys-kernel/${KERNEL}
 
 echo "[*] Base tools..."
-emerge --verbose app-admin/sudo sys-apps/mlocate app-shells/bash-completion \\
+emerge --verbose app-admin/sudo sys-apps/plocate app-shells/bash-completion \\
     sys-fs/e2fsprogs sys-fs/dosfstools ${FS_PKG}
 
 echo "[*] Bootloader (GRUB, ${BOOT_MODE})..."
@@ -318,7 +354,7 @@ echo "[*] XFCE (long build without binhost)..."
 emerge --verbose --oneshot xfce-extra/xfce4-notifyd
 emerge --verbose xfce-base/xfce4-meta \\
     xfce-extra/xfce4-pulseaudio-plugin xfce-extra/xfce4-power-manager \\
-    xfce-extra/xfce4-terminal x11-themes/gnome-themes-standard \\
+    x11-terms/xfce4-terminal \\
     media-fonts/dejavu media-fonts/noto media-sound/pavucontrol \\
     media-video/pipewire media-video/wireplumber
 
@@ -359,7 +395,7 @@ echo "[*] Bluetooth, Wi-Fi, printing, removable media..."
 emerge --verbose net-wireless/bluez net-wireless/blueman \\
     net-wireless/iw net-wireless/wireless-regdb net-wireless/wpa_supplicant \\
     net-print/cups net-print/cups-filters net-print/system-config-printer \\
-    net-dns/avahi sys-apps/udisks xfce-base/thunar-volman xfce-base/tumbler \\
+    net-dns/avahi sys-fs/udisks \\
     gnome-base/gvfs sys-process/procps sys-apps/usbutils sys-apps/pciutils \\
     x11-misc/xdg-user-dirs www-client/firefox-bin app-arch/unzip app-arch/zip
 
