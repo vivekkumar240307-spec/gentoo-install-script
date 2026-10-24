@@ -93,9 +93,10 @@ USER_PW=$(ask_secret "Password for $USERNAME")
 GPU=$(choose "Graphics driver (VIDEO_CARDS):" "intel" "amdgpu radeonsi" "nouveau" "vmware" "virtualbox" "fbdev vesa")
 KERNEL=$(choose "Kernel:" "gentoo-kernel-bin (prebuilt, fast)" "gentoo-kernel (compile locally)")
 KERNEL=${KERNEL%% *}
-BINHOST=$(choose "Use Gentoo official binary package host (much faster)?" yes no)
-JOBS=$(ask "Parallel jobs (MAKEOPTS -j)" "$(nproc)")
-CPU_FLAGS=$(ask "COMMON_FLAGS" "-O2 -pipe -march=native")
+BINHOST=yes   # official Gentoo binhost is the primary package source
+JOBS=$(ask "Parallel jobs (MAKEOPTS -j, only used for packages built from source)" "$(nproc)")
+# Binaries are built for generic x86-64; -march=native only affects local builds.
+CPU_FLAGS=$(ask "COMMON_FLAGS" "-O2 -pipe")
 
 # ---------- summary ----------
 echo
@@ -112,7 +113,7 @@ Network     : NetworkManager (+ Wi-Fi)
 Extras      : Bluetooth (bluez+blueman), CUPS printing, PipeWire audio, udisks/gvfs, Firefox
 GPU        : $GPU
 Kernel      : $KERNEL
-Binhost     : $BINHOST
+Binhost     : official Gentoo binary packages (primary, source build as fallback)
 Hostname    : $HOSTNAME_
 Timezone    : $TZ_
 Locale      : $LOCALE
@@ -190,17 +191,19 @@ CXXFLAGS="\${COMMON_FLAGS}"
 FCFLAGS="\${COMMON_FLAGS}"
 FFLAGS="\${COMMON_FLAGS}"
 MAKEOPTS="-j${JOBS}"
-EMERGE_DEFAULT_OPTS="--jobs=2 --quiet-build=y"
+# Binary packages first: --getbinpkg fetches from the binhost, falling back to
+# a source build only when no binary matches the USE flags.
+EMERGE_DEFAULT_OPTS="--jobs=2 --quiet-build=y --getbinpkg --binpkg-respect-use=y"
+FEATURES="getbinpkg binpkg-request-signature"
 ACCEPT_LICENSE="-* @FREE @BINARY-REDISTRIBUTABLE"
 LC_MESSAGES=C.utf8
 
-# Xorg + XFCE, no Wayland/GNOME/KDE
-USE="X xfce gtk3 dbus policykit udev networkmanager pulseaudio pipewire sound-server bluetooth wifi cups udisks gvfs -wayland -gnome -kde -qt5 -qt6 -elogind"
+# No global USE overrides on purpose: binaries are only used when your USE
+# flags match how they were built, so the desktop+systemd profile defaults are kept.
 VIDEO_CARDS="${GPU}"
 INPUT_DEVICES="libinput"
 GRUB_PLATFORMS="$([[ $BOOT_MODE == uefi ]] && echo efi-64 || echo pc)"
 EOF
-[[ "$BINHOST" == yes ]] && echo 'FEATURES="getbinpkg binpkg-request-signature"' >> "$MNT/etc/portage/make.conf"
 
 mkdir -p "$MNT/etc/portage/repos.conf" "$MNT/etc/portage/package.use"
 cp "$MNT/usr/share/portage/config/repos.conf" "$MNT/etc/portage/repos.conf/gentoo.conf"
@@ -258,6 +261,16 @@ source /etc/profile
 
 echo "[*] Syncing Portage tree..."
 emerge-webrsync
+
+# Binhost config: stage3 normally ships one; create it only if missing.
+mkdir -p /etc/portage/binrepos.conf
+if ! ls /etc/portage/binrepos.conf/*.conf >/dev/null 2>&1; then
+    cat > /etc/portage/binrepos.conf/gentoobinhost.conf <<BH
+[gentoobinhost]
+priority = 9999
+sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/
+BH
+fi
 ${GETUTO}
 
 echo "[*] Selecting profile ${PROFILE_NAME}..."
